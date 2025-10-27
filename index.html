@@ -4,261 +4,392 @@
   <meta charset="utf-8" />
   <meta http-equiv="Permissions-Policy" content="interest-cohort=()">
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Commander Table (Paste Lists Only)</title>
+  <title>Commander Table — Visual</title>
   <style>
-    body { font-family: system-ui, sans-serif; margin:0; display:grid; grid-template-columns: 320px 1fr; height:100vh; }
-    #sidebar { padding:12px; border-right:1px solid #ddd; overflow:auto; }
-    #table { position:relative; background:#0b3d2e; overflow:auto; padding:12px; }
-    .zone { border:1px solid #aaa; background:rgba(255,255,255,0.9); padding:8px; border-radius:6px; margin-bottom:8px; }
+    :root { --felt:#0b3d2e; --ui:#f7f7f7; --line:#d7d7d7; }
+    * { box-sizing: border-box; }
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, sans-serif; height:100vh; display:grid; grid-template-columns: 340px 1fr; }
+    #sidebar { padding:12px; border-right:1px solid var(--line); background:var(--ui); overflow:auto; }
+    #table { position:relative; background:var(--felt); overflow:auto; }
+    .toolbar { display:flex; gap:6px; flex-wrap:wrap; margin-bottom:8px; }
+    .panel { background:white; border:1px solid var(--line); border-radius:8px; padding:10px; margin-bottom:10px; box-shadow:0 2px 6px rgba(0,0,0,.04); }
     .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
-    .pile { display:flex; flex-wrap:wrap; gap:6px; }
-    .card { width:146px; height:204px; background:#eee; border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.3); position:relative; }
-    .card img { width:100%; height:100%; object-fit:cover; display:block; }
-    .tapped { transform: rotate(90deg); transform-origin:center; }
-    #log, #chat { font-size:12px; height:140px; overflow:auto; border:1px solid #ddd; padding:8px; background:#fafafa; }
-    textarea { width:100%; height:140px; }
-    code { font-size:12px; }
+    input, button, textarea { font: inherit; }
+    textarea { width:100%; height:120px; }
+    code { font-size:12px; background:#fff; border:1px solid var(--line); padding:2px 4px; border-radius:4px; }
+    .zone-title { font-weight:600; margin:0 0 8px 0; }
+    #handStrip { display:flex; gap:8px; overflow:auto; padding:8px; background:rgba(255,255,255,.9); border-top:1px solid var(--line); }
+    /* Card visuals */
+    .card { position:absolute; width:192px; height:268px; transform: translate(-50%, -50%); border-radius:10px; overflow:hidden; box-shadow:0 10px 24px rgba(0,0,0,.25); user-select:none; touch-action:none; }
+    .card img, .token { width:100%; height:100%; object-fit:cover; display:block; }
+    .card.tapped { transform: translate(-50%, -50%) rotate(90deg); }
+    .card .badge { position:absolute; left:6px; bottom:6px; background:rgba(0,0,0,.65); color:white; font-size:12px; padding:2px 6px; border-radius:999px; }
+    .ghost { position:absolute; border:2px dashed rgba(255,255,255,.5); border-radius:10px; width:192px; height:268px; transform: translate(-50%, -50%); pointer-events:none; }
+    .token { display:flex; align-items:center; justify-content:center; color:#111; font-weight:700; font-size:18px; background:#eee; }
+    /* HUD chips */
+    .chip { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; background:white; border:1px solid var(--line); }
+    .chip button { padding:0 8px; }
+    #chat { font-size:12px; height:140px; overflow:auto; border:1px solid var(--line); background:white; padding:8px; }
+    #log { font-size:12px; height:140px; overflow:auto; border:1px solid var(--line); background:#fff; padding:8px; }
+    /* Bottom dock for your hand */
+    #dock { position:absolute; left:0; right:0; bottom:0; }
+    .handCard { width:136px; height:190px; border-radius:8px; overflow:hidden; box-shadow:0 6px 14px rgba(0,0,0,.25); background:#eee; flex:0 0 auto; cursor:pointer; }
+    .hud { position:absolute; left:12px; top:12px; display:flex; gap:8px; }
   </style>
   <script type="module">
     import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
 
-    // Types
-    /**
-     * Minimal Scryfall shape
-     */
-    /** @typedef {{ image_uris?: { normal?: string }, card_faces?: Array<{ image_uris?: { normal?: string } }>, name: string, id: string }} ScryCard */
-    /** @typedef {"battlefield"|"hand"|"graveyard"|"exile"|"library"} ZoneName */
-    /** @typedef {{ uid: string, name: string, scryId: string, img: string, tapped: boolean, owner: string }} TCard */
-    /** @typedef {{ battlefield: string[], hand: string[], graveyard: string[], exile: string[], library: string[] }} Zones */
-    /** @typedef {{ id: string, name: string, zones: Zones, life: number }} PlayerState */
-    /** @typedef {{ tableId: string, players: Record<string, PlayerState>, cards: Record<string, TCard>, turnOrder: string[], active: string|null, phase: string, log: string[] }} TableState */
-
-    // DOM
-    const qs = (sel) => /** @type {HTMLElement} */ (document.querySelector(sel));
-    const $log = qs("#log");
-    const $chat = qs("#chat");
-    const $chatInput = /** @type {HTMLInputElement} */ (qs("#chatInput"));
-
-    // URL params
-    const url = new URL(location.href);
-    const tableId = url.searchParams.get("table") ?? "test";
-    const me = url.searchParams.get("name") ?? ("P" + Math.floor(Math.random() * 9999));
-    qs("#title").textContent = "Table: " + tableId;
-
-    // Supabase credentials: fill these
+    // ---------- Config ----------
     const SUPABASE_URL = "https://yocvjkjbnnqxgvsywiqi.supabase.co";
     const SUPABASE_ANON_KEY = "sb_publishable_dIL0xyBuxP2E1B_09Fq7kQ_op4xqqrF";
 
-    // Init realtime
+    // ---------- Types (JSDoc) ----------
+    /** @typedef {{ normal?: string }} ImageSet */
+    /** @typedef {{ name:string, id:string, image_uris?:ImageSet, card_faces?:Array<{image_uris?:ImageSet}>, layout?:string }} ScryCard */
+    /** @typedef {"library"|"hand"|"battlefield"|"graveyard"|"exile"} ZoneName */
+    /** @typedef {{ uid:string, name:string, scryId?:string, img?:string, tapped:boolean, owner:string, x?:number, y?:number, zone:ZoneName, token?:boolean, label?:string, color?:string, z:number }} TCard */
+    /** @typedef {{ battlefield:string[], hand:string[], graveyard:string[], exile:string[], library:string[] }} Zones */
+    /** @typedef {{ id:string, name:string, zones:Zones, life:number }} PlayerState */
+    /** @typedef {{ tableId:string, players:Record<string,PlayerState>, cards:Record<string,TCard>, turnOrder:string[], active:string|null, log:string[], zCounter:number }} TableState */
+
+    // ---------- DOM ----------
+    const $ = (s)=>/** @type {HTMLElement} */(document.querySelector(s));
+    const $$ = (s)=>/** @type {NodeListOf<HTMLElement>} */(document.querySelectorAll(s));
+    const $table = $("#table");
+    const $dock = $("#dock");
+    const $handStrip = $("#handStrip");
+    const $log = $("#log");
+    const $chat = $("#chat");
+
+    // ---------- Identity ----------
+    const url = new URL(location.href);
+    const tableId = url.searchParams.get("table") ?? "table";
+    const me = url.searchParams.get("name") ?? ("P" + Math.floor(Math.random()*9000+1000));
+    $("#title").textContent = "Table: " + tableId;
+
+    // ---------- Realtime ----------
     const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-    const channel = supabase.channel("table-" + tableId, { config: { broadcast: { ack: true, self: false } } });
+    const channel = supabase.channel("table-"+tableId, { config: { broadcast: { ack: true, self:false } } });
 
     /** @type {TableState} */
-    let state = { tableId, players: {}, cards: {}, turnOrder: [], active: null, phase: "Main 1", log: [] };
+    let state = { tableId, players:{}, cards:{}, turnOrder:[], active:null, log:[], zCounter:1 };
 
     function ensureMe() {
       if (!state.players[me]) {
-        state.players[me] = {
-          id: me,
-          name: me,
-          zones: { battlefield: [], hand: [], graveyard: [], exile: [], library: [] },
-          life: 40
-        };
+        state.players[me] = { id:me, name:me, life:40, zones:{ battlefield:[], hand:[], graveyard:[], exile:[], library:[] } };
       }
     }
 
-    function log(line) {
+    async function send(event, payload){ await channel.send({ type:"broadcast", event, payload }); }
+    function pushLog(line){
       state.log.push(line);
-      const p = document.createElement("p");
-      p.textContent = line;
-      $log.appendChild(p);
-      $log.scrollTop = $log.scrollHeight;
+      const p=document.createElement("p"); p.textContent=line;
+      $log.appendChild(p); $log.scrollTop=$log.scrollHeight;
     }
 
-    async function send(event, payload) {
-      await channel.send({ type: "broadcast", event, payload });
-    }
-
-    async function fetchCardByName(name) {
-      const res = await fetch("https://api.scryfall.com/cards/named?exact=" + encodeURIComponent(name));
-      if (!res.ok) throw new Error("Scryfall lookup failed: " + name);
+    // ---------- Scryfall ----------
+    async function scryByName(name){
+      const res = await fetch("https://api.scryfall.com/cards/named?exact="+encodeURIComponent(name));
+      if(!res.ok) throw new Error("Scryfall lookup failed: "+name);
       /** @type {ScryCard} */
       const c = await res.json();
-      return c;
+      const img = c.image_uris?.normal || c.card_faces?.[0]?.image_uris?.normal || "";
+      return { id:c.id, name:c.name, img };
     }
 
-    function pickImage(c) {
-      if (c.image_uris?.normal) return c.image_uris.normal;
-      if (c.card_faces?.[0]?.image_uris?.normal) return c.card_faces[0].image_uris.normal;
-      return "about:blank";
-    }
-
-    // Parse deck string
-    // Supported lines:
-    //   Commander: Atraxa, Grand Unifier   (optional, ignored for rules; it’s just a normal card)
-    //   1 Sol Ring
-    //   10 Forest
-    function parseDeck(text) {
-      /** @type {Array<{ name: string, qty: number }>} */
-      const out = [];
-      const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
-      for (const line of lines) {
-        if (/^Commander\s*:/i.test(line)) {
-          const name = line.replace(/^Commander\s*:\s*/i, "").trim();
-          if (name) out.push({ name, qty: 1 });
+    // ---------- Deck parsing ----------
+    // Lines like "1 Sol Ring" or "10 Forest". Optional "Commander: Name" accepted.
+    function parseDeck(text){
+      /** @type {Array<{name:string, qty:number}>} */
+      const out=[];
+      const lines=text.split(/\r?\n/).map(s=>s.trim()).filter(Boolean);
+      for(const line of lines){
+        if(/^Commander\s*:/i.test(line)){
+          const nm=line.replace(/^Commander\s*:\s*/i,"").trim();
+          if(nm) out.push({name:nm, qty:1});
           continue;
         }
-        const m = line.match(/^(\d+)x?\s+(.+)$/);
-        if (!m) continue;
-        const qty = Number(m[1]);
-        const name = m[2].replace(/\s+\(Commander\)$/i, "").trim();
-        out.push({ name, qty });
+        const m=line.match(/^(\d+)x?\s+(.+)$/);
+        if(!m) continue;
+        out.push({ name:m[2].trim(), qty:Number(m[1]) });
       }
       return out;
     }
 
-    async function addDeckToLibrary(entries) {
+    // ---------- State helpers ----------
+    function addCardTo(zone, card){
+      state.cards[card.uid]=card;
+      state.players[me].zones[zone].push(card.uid);
+    }
+    function moveCard(uid, from, to){
+      const p=state.players[me];
+      const src=p.zones[from];
+      const i=src.indexOf(uid); if(i>=0) src.splice(i,1);
+      p.zones[to].push(uid);
+    }
+
+    // ---------- Actions ----------
+    async function addSingleByName(name){
       ensureMe();
-      // Pull cards from Scryfall sequentially; simple and reliable for small decks
-      for (const entry of entries) {
-        for (let i = 0; i < entry.qty; i++) {
-          const sc = await fetchCardByName(entry.name);
-          const img = pickImage(sc);
+      const sc = await scryByName(name);
+      const uid = crypto.randomUUID();
+      addCardTo("library", { uid, name:sc.name, scryId:sc.id, img:sc.img, tapped:false, owner:me, zone:"library", z: state.zCounter++ });
+      await send("state", state); render();
+      pushLog(me+" added "+sc.name);
+    }
+
+    async function loadDeckFromText(text){
+      ensureMe();
+      const entries = parseDeck(text);
+      for(const e of entries){
+        for(let i=0;i<e.qty;i++){
+          const sc = await scryByName(e.name);
           const uid = crypto.randomUUID();
-          state.cards[uid] = { uid, name: sc.name, scryId: sc.id, img, tapped: false, owner: me };
-          state.players[me].zones.library.push(uid);
+          addCardTo("library", { uid, name:sc.name, scryId:sc.id, img:sc.img, tapped:false, owner:me, zone:"library", z: state.zCounter++ });
         }
       }
-      await send("state", state);
-      render();
-      const total = entries.reduce((a, e) => a + e.qty, 0);
-      log(me + " loaded " + total + " cards");
+      await send("state", state); render();
+      const total = entries.reduce((a,e)=>a+e.qty,0);
+      pushLog(me+" loaded "+total+" cards");
     }
 
-    function move(cardId, from, to) {
-      const p = state.players[me];
-      const src = p.zones[from];
-      const idx = src.indexOf(cardId);
-      if (idx >= 0) src.splice(idx, 1);
-      p.zones[to].push(cardId);
-      send("state", state);
-      render();
-    }
-
-    function draw(n) {
+    function draw(n){
       ensureMe();
       const lib = state.players[me].zones.library;
-      for (let i = 0; i < n && lib.length > 0; i++) {
-        const cardId = lib.pop();
-        if (cardId) state.players[me].zones.hand.push(cardId);
+      for(let i=0;i<n && lib.length>0;i++){
+        const uid = lib.pop();
+        if(uid){ state.cards[uid].zone="hand"; state.players[me].zones.hand.push(uid); }
       }
-      send("state", state);
-      render();
-      log(me + " draws " + n);
+      send("state", state); render();
+      pushLog(me+" draws "+n);
     }
 
-    function toggleTap(cardId) {
-      const c = state.cards[cardId];
-      c.tapped = !c.tapped;
-      send("state", state);
-      render();
-    }
-
-    function shuffleLibrary() {
+    function shuffleLibrary(){
       const lib = state.players[me].zones.library;
-      for (let i = lib.length - 1; i > 0; i--) {
-        const j = Math.floor(Math.random() * (i + 1));
-        const tmp = lib[i]; lib[i] = lib[j]; lib[j] = tmp;
+      for(let i=lib.length-1;i>0;i--){
+        const j=Math.floor(Math.random()*(i+1)); const t=lib[i]; lib[i]=lib[j]; lib[j]=t;
       }
-      send("state", state);
-      render();
-      log(me + " shuffles");
+      send("state", state); render();
+      pushLog(me+" shuffles");
     }
 
-    function render() {
-      const you = state.players[me];
-      if (!you) return;
-      const hand = qs("#hand .pile");
-      const bf = qs("#battlefield .pile");
-      const gy = qs("#graveyard .pile");
-      const ex = qs("#exile .pile");
-      const lib = qs("#library .pile");
-      for (const el of [hand, bf, gy, ex, lib]) el.replaceChildren();
-
-      const mk = (id, facedown) => {
-        const c = state.cards[id];
-        const d = document.createElement("div");
-        d.className = "card";
-        const img = document.createElement("img");
-        img.src = facedown ? "https://c2.scryfall.com/file/scryfall-errors/missing.jpg" : c.img;
-        d.appendChild(img);
-        if (c.tapped) d.classList.add("tapped");
-        d.onclick = (ev) => {
-          if (ev.shiftKey) toggleTap(id);
-          else move(id, "hand", "battlefield");
-        };
-        d.oncontextmenu = (ev) => { ev.preventDefault(); move(id, "battlefield", "graveyard"); };
-        return d;
-      };
-
-      for (const id of you.zones.hand) hand.appendChild(mk(id, false));
-      for (const id of you.zones.library) lib.appendChild(mk(id, true));
-      for (const id of you.zones.battlefield) bf.appendChild(mk(id, false));
-      for (const id of you.zones.graveyard) gy.appendChild(mk(id, false));
-      for (const id of you.zones.exile) ex.appendChild(mk(id, false));
+    function toggleTap(uid){
+      const c=state.cards[uid]; c.tapped=!c.tapped; c.z=state.zCounter++;
+      send("state", state); render();
     }
 
-    // Realtime wiring
-    channel.on("broadcast", { event: "state" }, (msg) => { state = msg.payload; render(); });
-    channel.on("broadcast", { event: "chat" }, (msg) => {
-      const p = document.createElement("p"); p.textContent = msg.payload; $chat.appendChild(p); $chat.scrollTop = $chat.scrollHeight;
+    function makeToken(label, color){
+      ensureMe();
+      const uid=crypto.randomUUID();
+      addCardTo("battlefield", { uid, name:label, tapped:false, owner:me, zone:"battlefield", token:true, label, color, x: 300+Math.random()*200, y: 200+Math.random()*200, z: state.zCounter++ });
+      send("state", state); render();
+      pushLog(me+" creates token: "+label);
+    }
+
+    function changeLife(delta){
+      ensureMe();
+      state.players[me].life += delta;
+      send("state", state); render();
+    }
+
+    // ---------- Drag handling ----------
+    let dragUid=null, dragDX=0, dragDY=0, ghost=null;
+    function beginDrag(uid, x, y){
+      dragUid=uid;
+      const c=state.cards[uid];
+      if(!c.x) c.x = x; if(!c.y) c.y=y;
+      dragDX = c.x - x; dragDY = c.y - y;
+      ghost=document.createElement("div"); ghost.className="ghost";
+      ghost.style.left=c.x+"px"; ghost.style.top=c.y+"px";
+      $table.appendChild(ghost);
+      c.z=state.zCounter++; render(); // bring to top
+    }
+    function continueDrag(x,y){
+      if(!dragUid) return;
+      ghost.style.left=(x+dragDX)+"px";
+      ghost.style.top=(y+dragDY)+"px";
+    }
+    function endDrag(x,y){
+      if(!dragUid) return;
+      const c=state.cards[dragUid];
+      c.x = x+dragDX; c.y = y+dragDY;
+      c.zone="battlefield";
+      moveCard(dragUid,"hand","battlefield"); // safe even if already on bf
+      send("state", state); render();
+      if(ghost){ ghost.remove(); ghost=null; }
+      dragUid=null;
+    }
+
+    // ---------- Rendering ----------
+    function render(){
+      const meState=state.players[me];
+      if(!meState) return;
+
+      // Battlefield
+      $table.replaceChildren();
+      const hud=document.createElement("div"); hud.className="hud";
+      const life=document.createElement("div"); life.className="chip";
+      life.innerHTML=`Life: <strong>${meState.life}</strong>
+        <button id="lminus">-</button><button id="lplus">+</button>`;
+      hud.appendChild(life);
+      $table.appendChild(hud);
+
+      // Place each battlefield card by owner visibility; all battlefield is shared
+      const allBattlefieldIds = Object.values(state.players).flatMap(p=>p.zones.battlefield);
+      // Sort by z
+      allBattlefieldIds.sort((a,b)=>state.cards[a].z - state.cards[b].z);
+      for(const uid of allBattlefieldIds){
+        const c=state.cards[uid];
+        const el=document.createElement("div");
+        el.className="card"+(c.tapped?" tapped":"");
+        el.style.left=(c.x ?? 400)+"px";
+        el.style.top=(c.y ?? 240)+"px";
+        el.style.zIndex=String(c.z || 1);
+        el.dataset.uid=uid;
+
+        if(c.token){
+          const t=document.createElement("div"); t.className="token";
+          t.style.background=c.color || "#eee";
+          t.textContent=c.label || "Token";
+          el.appendChild(t);
+        } else {
+          const img=document.createElement("img");
+          img.src=c.img || "https://c2.scryfall.com/file/scryfall-errors/missing.jpg";
+          el.appendChild(img);
+        }
+        const badge=document.createElement("div"); badge.className="badge"; badge.textContent=c.name;
+        el.appendChild(badge);
+
+        // interactions
+        el.addEventListener("pointerdown",(ev)=>{
+          ev.preventDefault();
+          el.setPointerCapture(ev.pointerId);
+          if(ev.button===2){ return; }
+          beginDrag(uid, ev.clientX + $table.scrollLeft, ev.clientY + $table.scrollTop);
+        });
+        el.addEventListener("pointermove",(ev)=>{
+          if(dragUid!==uid) return;
+          continueDrag(ev.clientX + $table.scrollLeft, ev.clientY + $table.scrollTop);
+        });
+        el.addEventListener("pointerup",(ev)=>{
+          if(dragUid!==uid) return;
+          endDrag(ev.clientX + $table.scrollLeft, ev.clientY + $table.scrollTop);
+        });
+        el.addEventListener("click",(ev)=>{
+          if(dragUid) return;
+          if(ev.shiftKey){ toggleTap(uid); }
+        });
+        el.addEventListener("contextmenu",(ev)=>{
+          ev.preventDefault();
+          const p=state.players[me];
+          // move battlefield -> graveyard (yours only)
+          if(p.zones.battlefield.includes(uid)){
+            const i=p.zones.battlefield.indexOf(uid); if(i>=0) p.zones.battlefield.splice(i,1);
+            p.zones.graveyard.push(uid);
+            state.cards[uid].zone="graveyard";
+            send("state", state); render();
+            pushLog(me+" moves "+state.cards[uid].name+" to graveyard");
+          }
+        });
+
+        $table.appendChild(el);
+      }
+
+      // HUD listeners
+      $("#lminus")?.addEventListener("click",()=>changeLife(-1));
+      $("#lplus")?.addEventListener("click",()=>changeLife(+1));
+
+      // Dock (your hand)
+      $dock.replaceChildren();
+      const handPanel=document.createElement("div");
+      handPanel.innerHTML=`<div class="panel"><div class="zone-title">Your Hand</div>
+        <div id="handStrip"></div></div>`;
+      $dock.appendChild(handPanel);
+      const strip=handPanel.querySelector("#handStrip");
+      strip.replaceChildren();
+      for(const uid of meState.zones.hand){
+        const c=state.cards[uid];
+        const hc=document.createElement("img");
+        hc.className="handCard";
+        hc.src=c.img || "https://c2.scryfall.com/file/scryfall-errors/missing.jpg";
+        hc.title=c.name;
+        hc.addEventListener("pointerdown",(ev)=>{
+          ev.preventDefault();
+          const x=ev.clientX + $table.scrollLeft;
+          const y=ev.clientY + $table.scrollTop - 240; // spawn above dock
+          state.cards[uid].x=x; state.cards[uid].y=y; state.cards[uid].z=state.zCounter++;
+          endDrag(x,y); // will move to battlefield
+        });
+        strip.appendChild(hc);
+      }
+    }
+
+    // ---------- Realtime wiring ----------
+    channel.on("broadcast",{event:"state"},(msg)=>{ state=msg.payload; render(); });
+    channel.on("broadcast",{event:"chat"},(msg)=>{
+      const p=document.createElement("p"); p.textContent=msg.payload; $chat.appendChild(p); $chat.scrollTop=$chat.scrollHeight;
     });
     await channel.subscribe();
 
-    // Controls
-    /** @type {HTMLButtonElement} */ (qs("#joinBtn")).onclick = async () => {
+    // ---------- Controls ----------
+    $("#joinBtn").addEventListener("click", async ()=>{
       ensureMe();
-      state.players[me].name = /** @type {HTMLInputElement} */ (qs("#playerName")).value || me;
-      if (!state.turnOrder.includes(me)) state.turnOrder.push(me);
-      await send("state", state);
-      render();
-      log(me + " joined");
-    };
+      state.players[me].name = /** @type {HTMLInputElement} */($("#playerName")).value || me;
+      if(!state.turnOrder.includes(me)) state.turnOrder.push(me);
+      await send("state", state); render();
+      pushLog(me+" joined");
+    });
 
-    /** @type {HTMLButtonElement} */ (qs("#pasteBtn")).onclick = async () => {
-      const txt = /** @type {HTMLTextAreaElement} */ (qs("#paste")).value;
-      const list = parseDeck(txt);
-      await addDeckToLibrary(list);
-    };
+    $("#addByNameBtn").addEventListener("click", async ()=>{
+      const nm = /** @type {HTMLInputElement} */($("#singleName")).value.trim();
+      if(nm) await addSingleByName(nm);
+    });
 
-    /** @type {HTMLButtonElement} */ (qs("#draw1")).onclick = () => draw(1);
-    /** @type {HTMLButtonElement} */ (qs("#draw7")).onclick = () => draw(7);
-    /** @type {HTMLButtonElement} */ (qs("#shuffle")).onclick = () => shuffleLibrary();
+    $("#pasteBtn").addEventListener("click", async ()=>{
+      const txt=/** @type {HTMLTextAreaElement} */($("#paste")).value;
+      await loadDeckFromText(txt);
+    });
 
-    /** @type {HTMLButtonElement} */ (qs("#chatSend")).onclick = async () => {
-      const msg = me + ": " + $chatInput.value;
-      $chatInput.value = "";
-      await send("chat", msg);
-    };
+    $("#draw1").addEventListener("click", ()=>draw(1));
+    $("#draw7").addEventListener("click", ()=>draw(7));
+    $("#shuffle").addEventListener("click", ()=>shuffleLibrary());
 
+    $("#tokenBtn").addEventListener("click", ()=>{
+      const label=(/** @type {HTMLInputElement} */($("#tokenLabel")).value || "Token").trim();
+      const color=(/** @type {HTMLInputElement} */($("#tokenColor")).value || "#eee").trim();
+      makeToken(label, color);
+    });
+
+    $("#chatSend").addEventListener("click", async ()=>{
+      const s=/** @type {HTMLInputElement} */($("#chatInput")).value;
+      /** @type {HTMLInputElement} */($("#chatInput")).value="";
+      await send("chat", me+": "+s);
+    });
+
+    // initial render
     render();
   </script>
 </head>
 <body>
   <aside id="sidebar">
-    <h3 id="title"></h3>
-
-    <div class="zone">
+    <div class="panel">
+      <div class="zone-title" id="title"></div>
       <div class="row">
         <input id="playerName" placeholder="Your name" />
-        <button id="joinBtn">Join table</button>
+        <button id="joinBtn">Join</button>
       </div>
-      <label>Shareable URL</label>
-      <code>?table=friday-night&name=Jo</code>
+      <div class="row" style="margin-top:6px">
+        <span class="chip">Share URL: <code>?table=friday&name=Jo</code></span>
+      </div>
     </div>
 
-    <div class="zone">
-      <strong>Paste decklist</strong>
+    <div class="panel">
+      <div class="zone-title">Deck & Cards</div>
+      <div class="row">
+        <input id="singleName" placeholder="Add card by name" />
+        <button id="addByNameBtn">Add</button>
+      </div>
+      <p style="margin:8px 0 4px 0; font-size:12px">Paste list:</p>
       <textarea id="paste" placeholder="Commander: Atraxa, Grand Unifier
 1 Sol Ring
 1 Arcane Signet
@@ -266,42 +397,41 @@
 10 Island
 10 Plains
 10 Swamp"></textarea>
-      <div class="row">
+      <div class="toolbar">
         <button id="pasteBtn">Load Deck</button>
-      </div>
-      <p style="font-size:12px;color:#555">Format: lines like &ldquo;3 Island&rdquo; or &ldquo;1 Sol Ring&rdquo;. Optional &ldquo;Commander: Name&rdquo; line. Images by Scryfall.</p>
-    </div>
-
-    <div class="zone">
-      <strong>Actions</strong>
-      <div class="row">
         <button id="draw1">Draw 1</button>
         <button id="draw7">Draw 7</button>
-        <button id="shuffle">Shuffle Library</button>
+        <button id="shuffle">Shuffle</button>
       </div>
-      <p style="font-size:12px;color:#555">Click a hand card to play it. Shift-click a battlefield card to tap/untap. Right-click a battlefield card to send it to graveyard.</p>
+      <p style="font-size:12px;color:#555">Images courtesy of Scryfall. Spell names must be exact.</p>
     </div>
 
-    <div class="zone">
-      <strong>Table Chat</strong>
+    <div class="panel">
+      <div class="zone-title">Tokens</div>
+      <div class="row">
+        <input id="tokenLabel" placeholder="1/1 Soldier" />
+        <input id="tokenColor" type="color" value="#eee" title="Token color" />
+        <button id="tokenBtn">Create Token</button>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="zone-title">Chat</div>
       <div id="chat"></div>
-      <div class="row"><input id="chatInput" placeholder="Message" /><button id="chatSend">Send</button></div>
+      <div class="row" style="margin-top:6px">
+        <input id="chatInput" placeholder="Message" />
+        <button id="chatSend">Send</button>
+      </div>
     </div>
 
-    <div class="zone">
-      <strong>Log</strong>
+    <div class="panel">
+      <div class="zone-title">Log</div>
       <div id="log"></div>
     </div>
-
-    <p style="font-size:11px;color:#666">Card data and images courtesy of Scryfall. Keep this noncommercial and include attribution.</p>
   </aside>
 
   <main id="table">
-    <div id="hand" class="zone"><strong>Your Hand</strong><div class="pile"></div></div>
-    <div id="battlefield" class="zone"><strong>Battlefield</strong><div class="pile"></div></div>
-    <div id="graveyard" class="zone"><strong>Graveyard</strong><div class="pile"></div></div>
-    <div id="exile" class="zone"><strong>Exile</strong><div class="pile"></div></div>
-    <div id="library" class="zone"><strong>Library (top hidden)</strong><div class="pile"></div></div>
+    <div id="dock"></div>
   </main>
 </body>
 </html>
