@@ -130,14 +130,23 @@
       state.players[me].zones[zone].push(card.uid);
     }
     function moveCard(uid, from, to){
-      if(from===to) return;
-      const p=state.players[me];
-      if(!p) return;
-      const src=p.zones[from];
-      const i=src?.indexOf(uid) ?? -1;
-      if(i>=0) src.splice(i,1);
-      const dest=p.zones[to];
-      if(dest && !dest.includes(uid)) dest.push(uid);
+      const card = state.cards[uid];
+      if(!card) return "missing";
+      const ownerState = state.players[card.owner] ?? state.players[me];
+      if(!ownerState) return "missing-owner";
+      const src = ownerState.zones[from];
+      if(src){
+        const i = src.indexOf(uid);
+        if(i>=0) src.splice(i,1);
+      }
+      if(card.token && (to === "graveyard" || to === "exile")){
+        delete state.cards[uid];
+        return "destroyed";
+      }
+      card.zone = to;
+      if(!ownerState.zones[to]) ownerState.zones[to] = [];
+      ownerState.zones[to].push(uid);
+      return "moved";
     }
 
     // ---------- Actions ----------
@@ -359,11 +368,17 @@
           const p=state.players[me];
           // move battlefield -> graveyard (yours only)
           if(p.zones.battlefield.includes(uid)){
-            const i=p.zones.battlefield.indexOf(uid); if(i>=0) p.zones.battlefield.splice(i,1);
-            p.zones.graveyard.push(uid);
-            state.cards[uid].zone="graveyard";
+            const cardInfo = state.cards[uid];
+            const cardName = cardInfo?.name || "Card";
+            const wasToken = !!cardInfo?.token;
+            const result = moveCard(uid,"battlefield","graveyard");
+            if(result === "missing" || result === "missing-owner") return;
             send("state", state); render();
-            pushLog(me+" moves "+state.cards[uid].name+" to graveyard");
+            if(result === "destroyed" && wasToken){
+              pushLog(me+" destroys token: "+cardName);
+            } else if(result === "moved"){
+              pushLog(me+" moves "+cardName+" to graveyard");
+            }
           }
         });
 
