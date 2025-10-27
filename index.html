@@ -1,0 +1,307 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta http-equiv="Permissions-Policy" content="interest-cohort=()">
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Commander Table (Paste Lists Only)</title>
+  <style>
+    body { font-family: system-ui, sans-serif; margin:0; display:grid; grid-template-columns: 320px 1fr; height:100vh; }
+    #sidebar { padding:12px; border-right:1px solid #ddd; overflow:auto; }
+    #table { position:relative; background:#0b3d2e; overflow:auto; padding:12px; }
+    .zone { border:1px solid #aaa; background:rgba(255,255,255,0.9); padding:8px; border-radius:6px; margin-bottom:8px; }
+    .row { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .pile { display:flex; flex-wrap:wrap; gap:6px; }
+    .card { width:146px; height:204px; background:#eee; border-radius:8px; overflow:hidden; box-shadow:0 2px 8px rgba(0,0,0,0.3); position:relative; }
+    .card img { width:100%; height:100%; object-fit:cover; display:block; }
+    .tapped { transform: rotate(90deg); transform-origin:center; }
+    #log, #chat { font-size:12px; height:140px; overflow:auto; border:1px solid #ddd; padding:8px; background:#fafafa; }
+    textarea { width:100%; height:140px; }
+    code { font-size:12px; }
+  </style>
+  <script type="module">
+    import { createClient } from "https://esm.sh/@supabase/supabase-js@2";
+
+    // Types
+    /**
+     * Minimal Scryfall shape
+     */
+    /** @typedef {{ image_uris?: { normal?: string }, card_faces?: Array<{ image_uris?: { normal?: string } }>, name: string, id: string }} ScryCard */
+    /** @typedef {"battlefield"|"hand"|"graveyard"|"exile"|"library"} ZoneName */
+    /** @typedef {{ uid: string, name: string, scryId: string, img: string, tapped: boolean, owner: string }} TCard */
+    /** @typedef {{ battlefield: string[], hand: string[], graveyard: string[], exile: string[], library: string[] }} Zones */
+    /** @typedef {{ id: string, name: string, zones: Zones, life: number }} PlayerState */
+    /** @typedef {{ tableId: string, players: Record<string, PlayerState>, cards: Record<string, TCard>, turnOrder: string[], active: string|null, phase: string, log: string[] }} TableState */
+
+    // DOM
+    const qs = (sel) => /** @type {HTMLElement} */ (document.querySelector(sel));
+    const $log = qs("#log");
+    const $chat = qs("#chat");
+    const $chatInput = /** @type {HTMLInputElement} */ (qs("#chatInput"));
+
+    // URL params
+    const url = new URL(location.href);
+    const tableId = url.searchParams.get("table") ?? "test";
+    const me = url.searchParams.get("name") ?? ("P" + Math.floor(Math.random() * 9999));
+    qs("#title").textContent = "Table: " + tableId;
+
+    // Supabase credentials: fill these
+    const SUPABASE_URL = "https://yocvjkjbnnqxgvsywiqi.supabase.co";
+    const SUPABASE_ANON_KEY = "sb_publishable_dIL0xyBuxP2E1B_09Fq7kQ_op4xqqrF";
+
+    // Init realtime
+    const supabase = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+    const channel = supabase.channel("table-" + tableId, { config: { broadcast: { ack: true, self: false } } });
+
+    /** @type {TableState} */
+    let state = { tableId, players: {}, cards: {}, turnOrder: [], active: null, phase: "Main 1", log: [] };
+
+    function ensureMe() {
+      if (!state.players[me]) {
+        state.players[me] = {
+          id: me,
+          name: me,
+          zones: { battlefield: [], hand: [], graveyard: [], exile: [], library: [] },
+          life: 40
+        };
+      }
+    }
+
+    function log(line) {
+      state.log.push(line);
+      const p = document.createElement("p");
+      p.textContent = line;
+      $log.appendChild(p);
+      $log.scrollTop = $log.scrollHeight;
+    }
+
+    async function send(event, payload) {
+      await channel.send({ type: "broadcast", event, payload });
+    }
+
+    async function fetchCardByName(name) {
+      const res = await fetch("https://api.scryfall.com/cards/named?exact=" + encodeURIComponent(name));
+      if (!res.ok) throw new Error("Scryfall lookup failed: " + name);
+      /** @type {ScryCard} */
+      const c = await res.json();
+      return c;
+    }
+
+    function pickImage(c) {
+      if (c.image_uris?.normal) return c.image_uris.normal;
+      if (c.card_faces?.[0]?.image_uris?.normal) return c.card_faces[0].image_uris.normal;
+      return "about:blank";
+    }
+
+    // Parse deck string
+    // Supported lines:
+    //   Commander: Atraxa, Grand Unifier   (optional, ignored for rules; it’s just a normal card)
+    //   1 Sol Ring
+    //   10 Forest
+    function parseDeck(text) {
+      /** @type {Array<{ name: string, qty: number }>} */
+      const out = [];
+      const lines = text.split(/\r?\n/).map(s => s.trim()).filter(Boolean);
+      for (const line of lines) {
+        if (/^Commander\s*:/i.test(line)) {
+          const name = line.replace(/^Commander\s*:\s*/i, "").trim();
+          if (name) out.push({ name, qty: 1 });
+          continue;
+        }
+        const m = line.match(/^(\d+)x?\s+(.+)$/);
+        if (!m) continue;
+        const qty = Number(m[1]);
+        const name = m[2].replace(/\s+\(Commander\)$/i, "").trim();
+        out.push({ name, qty });
+      }
+      return out;
+    }
+
+    async function addDeckToLibrary(entries) {
+      ensureMe();
+      // Pull cards from Scryfall sequentially; simple and reliable for small decks
+      for (const entry of entries) {
+        for (let i = 0; i < entry.qty; i++) {
+          const sc = await fetchCardByName(entry.name);
+          const img = pickImage(sc);
+          const uid = crypto.randomUUID();
+          state.cards[uid] = { uid, name: sc.name, scryId: sc.id, img, tapped: false, owner: me };
+          state.players[me].zones.library.push(uid);
+        }
+      }
+      await send("state", state);
+      render();
+      const total = entries.reduce((a, e) => a + e.qty, 0);
+      log(me + " loaded " + total + " cards");
+    }
+
+    function move(cardId, from, to) {
+      const p = state.players[me];
+      const src = p.zones[from];
+      const idx = src.indexOf(cardId);
+      if (idx >= 0) src.splice(idx, 1);
+      p.zones[to].push(cardId);
+      send("state", state);
+      render();
+    }
+
+    function draw(n) {
+      ensureMe();
+      const lib = state.players[me].zones.library;
+      for (let i = 0; i < n && lib.length > 0; i++) {
+        const cardId = lib.pop();
+        if (cardId) state.players[me].zones.hand.push(cardId);
+      }
+      send("state", state);
+      render();
+      log(me + " draws " + n);
+    }
+
+    function toggleTap(cardId) {
+      const c = state.cards[cardId];
+      c.tapped = !c.tapped;
+      send("state", state);
+      render();
+    }
+
+    function shuffleLibrary() {
+      const lib = state.players[me].zones.library;
+      for (let i = lib.length - 1; i > 0; i--) {
+        const j = Math.floor(Math.random() * (i + 1));
+        const tmp = lib[i]; lib[i] = lib[j]; lib[j] = tmp;
+      }
+      send("state", state);
+      render();
+      log(me + " shuffles");
+    }
+
+    function render() {
+      const you = state.players[me];
+      if (!you) return;
+      const hand = qs("#hand .pile");
+      const bf = qs("#battlefield .pile");
+      const gy = qs("#graveyard .pile");
+      const ex = qs("#exile .pile");
+      const lib = qs("#library .pile");
+      for (const el of [hand, bf, gy, ex, lib]) el.replaceChildren();
+
+      const mk = (id, facedown) => {
+        const c = state.cards[id];
+        const d = document.createElement("div");
+        d.className = "card";
+        const img = document.createElement("img");
+        img.src = facedown ? "https://c2.scryfall.com/file/scryfall-errors/missing.jpg" : c.img;
+        d.appendChild(img);
+        if (c.tapped) d.classList.add("tapped");
+        d.onclick = (ev) => {
+          if (ev.shiftKey) toggleTap(id);
+          else move(id, "hand", "battlefield");
+        };
+        d.oncontextmenu = (ev) => { ev.preventDefault(); move(id, "battlefield", "graveyard"); };
+        return d;
+      };
+
+      for (const id of you.zones.hand) hand.appendChild(mk(id, false));
+      for (const id of you.zones.library) lib.appendChild(mk(id, true));
+      for (const id of you.zones.battlefield) bf.appendChild(mk(id, false));
+      for (const id of you.zones.graveyard) gy.appendChild(mk(id, false));
+      for (const id of you.zones.exile) ex.appendChild(mk(id, false));
+    }
+
+    // Realtime wiring
+    channel.on("broadcast", { event: "state" }, (msg) => { state = msg.payload; render(); });
+    channel.on("broadcast", { event: "chat" }, (msg) => {
+      const p = document.createElement("p"); p.textContent = msg.payload; $chat.appendChild(p); $chat.scrollTop = $chat.scrollHeight;
+    });
+    await channel.subscribe();
+
+    // Controls
+    /** @type {HTMLButtonElement} */ (qs("#joinBtn")).onclick = async () => {
+      ensureMe();
+      state.players[me].name = /** @type {HTMLInputElement} */ (qs("#playerName")).value || me;
+      if (!state.turnOrder.includes(me)) state.turnOrder.push(me);
+      await send("state", state);
+      render();
+      log(me + " joined");
+    };
+
+    /** @type {HTMLButtonElement} */ (qs("#pasteBtn")).onclick = async () => {
+      const txt = /** @type {HTMLTextAreaElement} */ (qs("#paste")).value;
+      const list = parseDeck(txt);
+      await addDeckToLibrary(list);
+    };
+
+    /** @type {HTMLButtonElement} */ (qs("#draw1")).onclick = () => draw(1);
+    /** @type {HTMLButtonElement} */ (qs("#draw7")).onclick = () => draw(7);
+    /** @type {HTMLButtonElement} */ (qs("#shuffle")).onclick = () => shuffleLibrary();
+
+    /** @type {HTMLButtonElement} */ (qs("#chatSend")).onclick = async () => {
+      const msg = me + ": " + $chatInput.value;
+      $chatInput.value = "";
+      await send("chat", msg);
+    };
+
+    render();
+  </script>
+</head>
+<body>
+  <aside id="sidebar">
+    <h3 id="title"></h3>
+
+    <div class="zone">
+      <div class="row">
+        <input id="playerName" placeholder="Your name" />
+        <button id="joinBtn">Join table</button>
+      </div>
+      <label>Shareable URL</label>
+      <code>?table=friday-night&name=Jo</code>
+    </div>
+
+    <div class="zone">
+      <strong>Paste decklist</strong>
+      <textarea id="paste" placeholder="Commander: Atraxa, Grand Unifier
+1 Sol Ring
+1 Arcane Signet
+10 Forest
+10 Island
+10 Plains
+10 Swamp"></textarea>
+      <div class="row">
+        <button id="pasteBtn">Load Deck</button>
+      </div>
+      <p style="font-size:12px;color:#555">Format: lines like &ldquo;3 Island&rdquo; or &ldquo;1 Sol Ring&rdquo;. Optional &ldquo;Commander: Name&rdquo; line. Images by Scryfall.</p>
+    </div>
+
+    <div class="zone">
+      <strong>Actions</strong>
+      <div class="row">
+        <button id="draw1">Draw 1</button>
+        <button id="draw7">Draw 7</button>
+        <button id="shuffle">Shuffle Library</button>
+      </div>
+      <p style="font-size:12px;color:#555">Click a hand card to play it. Shift-click a battlefield card to tap/untap. Right-click a battlefield card to send it to graveyard.</p>
+    </div>
+
+    <div class="zone">
+      <strong>Table Chat</strong>
+      <div id="chat"></div>
+      <div class="row"><input id="chatInput" placeholder="Message" /><button id="chatSend">Send</button></div>
+    </div>
+
+    <div class="zone">
+      <strong>Log</strong>
+      <div id="log"></div>
+    </div>
+
+    <p style="font-size:11px;color:#666">Card data and images courtesy of Scryfall. Keep this noncommercial and include attribution.</p>
+  </aside>
+
+  <main id="table">
+    <div id="hand" class="zone"><strong>Your Hand</strong><div class="pile"></div></div>
+    <div id="battlefield" class="zone"><strong>Battlefield</strong><div class="pile"></div></div>
+    <div id="graveyard" class="zone"><strong>Graveyard</strong><div class="pile"></div></div>
+    <div id="exile" class="zone"><strong>Exile</strong><div class="pile"></div></div>
+    <div id="library" class="zone"><strong>Library (top hidden)</strong><div class="pile"></div></div>
+  </main>
+</body>
+</html>
