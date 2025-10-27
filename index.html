@@ -24,7 +24,7 @@
     .card img, .token { width:100%; height:100%; object-fit:cover; display:block; }
     .card.tapped { transform: translate(-50%, -50%) rotate(90deg); }
     .card .badge { position:absolute; left:6px; bottom:6px; background:rgba(0,0,0,.65); color:white; font-size:12px; padding:2px 6px; border-radius:999px; }
-    .ghost { position:absolute; border:2px dashed rgba(255,255,255,.5); border-radius:10px; width:192px; height:268px; transform: translate(-50%, -50%); pointer-events:none; }
+    .ghost { position:absolute; border:2px dashed rgba(255,255,255,.6); border-radius:10px; width:192px; height:268px; transform: translate(-50%, -50%); pointer-events:none; background-size:cover; background-position:center; display:flex; align-items:center; justify-content:center; font-weight:600; text-align:center; padding:12px; }
     .token { display:flex; align-items:center; justify-content:center; color:#111; font-weight:700; font-size:18px; background:#eee; }
     .pile { position:absolute; width:160px; height:220px; transform: translate(-50%, -50%); border-radius:10px; overflow:hidden; box-shadow:0 8px 24px rgba(0,0,0,.3); display:flex; flex-direction:column; justify-content:flex-end; align-items:center; color:white; font-weight:600; border:1px solid rgba(255,255,255,.25); background:#10251c; pointer-events:none; }
     .pile img { position:absolute; inset:0; width:100%; height:100%; object-fit:cover; filter:brightness(.85); }
@@ -38,7 +38,10 @@
     #log { font-size:12px; height:140px; overflow:auto; border:1px solid var(--line); background:#fff; padding:8px; }
     /* Bottom dock for your hand */
     #dock { position:absolute; left:0; right:0; bottom:0; }
-    .handCard { width:136px; height:190px; border-radius:8px; overflow:hidden; box-shadow:0 6px 14px rgba(0,0,0,.25); background:#eee; flex:0 0 auto; cursor:pointer; }
+    .handCard { width:136px; flex:0 0 auto; cursor:pointer; display:flex; flex-direction:column; align-items:center; gap:4px; user-select:none; }
+    .handCard img { width:100%; height:190px; border-radius:8px; overflow:hidden; box-shadow:0 6px 14px rgba(0,0,0,.25); background:#eee; object-fit:cover; }
+    .handCardName { font-size:12px; text-align:center; color:#222; padding-bottom:4px; }
+    .card.is-dragging { opacity:0.9; box-shadow:0 14px 30px rgba(0,0,0,.35); }
     .hud { position:absolute; left:12px; top:12px; display:flex; gap:8px; }
   </style>
   <script type="module">
@@ -211,32 +214,82 @@
     }
 
     // ---------- Drag handling ----------
-    let dragUid=null, dragDX=0, dragDY=0, ghost=null;
-    function beginDrag(uid, x, y){
+    let dragUid=null, dragDX=0, dragDY=0, ghost=null, dragOriginZone=null, lastPointerX=0, lastPointerY=0;
+    function beginDrag(uid, x, y, originZoneOverride){
       dragUid=uid;
+      lastPointerX = x; lastPointerY = y;
       const c=state.cards[uid];
+      dragOriginZone = originZoneOverride ?? c.zone;
       if(!c.x) c.x = x; if(!c.y) c.y=y;
       dragDX = c.x - x; dragDY = c.y - y;
+      c.z=state.zCounter++;
+      render(); // ensure updated z-index and battlefield rendering
+      if(ghost){ ghost.remove(); }
       ghost=document.createElement("div"); ghost.className="ghost";
       ghost.style.left=c.x+"px"; ghost.style.top=c.y+"px";
+      if(c.token){
+        ghost.textContent=c.label || "Token";
+        ghost.style.backgroundImage="";
+        ghost.style.backgroundColor=c.color || "rgba(255,255,255,.85)";
+        ghost.style.color="#111";
+      } else if(c.img){
+        ghost.style.backgroundImage=`url(${c.img})`;
+        ghost.textContent="";
+        ghost.style.backgroundColor="";
+        ghost.style.color="";
+      }
+      ghost.style.zIndex=String((c.z || 1)+1);
       $table.appendChild(ghost);
-      c.z=state.zCounter++; render(); // bring to top
+      const el=$table.querySelector(`.card[data-uid="${uid}"]`);
+      el?.classList.add("is-dragging");
     }
     function continueDrag(x,y){
       if(!dragUid) return;
-      ghost.style.left=(x+dragDX)+"px";
-      ghost.style.top=(y+dragDY)+"px";
+      lastPointerX = x; lastPointerY = y;
+      if(ghost){
+        ghost.style.left=(x+dragDX)+"px";
+        ghost.style.top=(y+dragDY)+"px";
+      }
+      const el=$table.querySelector(`.card[data-uid="${dragUid}"]`);
+      if(el){
+        el.style.left=(x+dragDX)+"px";
+        el.style.top=(y+dragDY)+"px";
+      }
+    }
+    function finalizeDrag(){
+      if(!dragUid) return;
+      const el=$table.querySelector(`.card[data-uid="${dragUid}"]`);
+      el?.classList.remove("is-dragging");
+      if(ghost){ ghost.remove(); ghost=null; }
+      dragUid=null;
+      dragOriginZone=null;
     }
     function endDrag(x,y){
       if(!dragUid) return;
       const c=state.cards[dragUid];
       c.x = x+dragDX; c.y = y+dragDY;
+      const fromZone = dragOriginZone;
       c.zone="battlefield";
-      moveCard(dragUid,"hand","battlefield"); // safe even if already on bf
-      send("state", state); render();
-      if(ghost){ ghost.remove(); ghost=null; }
-      dragUid=null;
+      if(fromZone && fromZone!=="battlefield"){
+        moveCard(dragUid, fromZone, "battlefield");
+      }
+      finalizeDrag();
+      send("state", state);
+      render();
     }
+
+    window.addEventListener("pointermove",(ev)=>{
+      if(!dragUid) return;
+      continueDrag(ev.clientX + $table.scrollLeft, ev.clientY + $table.scrollTop);
+    });
+    window.addEventListener("pointerup",(ev)=>{
+      if(!dragUid) return;
+      endDrag(ev.clientX + $table.scrollLeft, ev.clientY + $table.scrollTop);
+    });
+    window.addEventListener("pointercancel",()=>{
+      if(!dragUid) return;
+      endDrag(lastPointerX, lastPointerY);
+    });
 
     // ---------- Rendering ----------
     function render(){
@@ -303,17 +356,8 @@
         // interactions
         el.addEventListener("pointerdown",(ev)=>{
           ev.preventDefault();
-          el.setPointerCapture(ev.pointerId);
           if(ev.button===2){ return; }
           beginDrag(uid, ev.clientX + $table.scrollLeft, ev.clientY + $table.scrollTop);
-        });
-        el.addEventListener("pointermove",(ev)=>{
-          if(dragUid!==uid) return;
-          continueDrag(ev.clientX + $table.scrollLeft, ev.clientY + $table.scrollTop);
-        });
-        el.addEventListener("pointerup",(ev)=>{
-          if(dragUid!==uid) return;
-          endDrag(ev.clientX + $table.scrollLeft, ev.clientY + $table.scrollTop);
         });
         el.addEventListener("click",(ev)=>{
           if(dragUid) return;
@@ -365,18 +409,44 @@
       strip.replaceChildren();
       for(const uid of meState.zones.hand){
         const c=state.cards[uid];
-        const hc=document.createElement("img");
-        hc.className="handCard";
-        hc.src=c.img || "https://c2.scryfall.com/file/scryfall-errors/missing.jpg";
-        hc.title=c.name;
-        hc.addEventListener("pointerdown",(ev)=>{
+        const handCard=document.createElement("div");
+        handCard.className="handCard";
+        const img=document.createElement("img");
+        img.src=c.img || "https://c2.scryfall.com/file/scryfall-errors/missing.jpg";
+        img.alt=c.name;
+        handCard.appendChild(img);
+        const label=document.createElement("div");
+        label.className="handCardName";
+        label.textContent=c.name;
+        handCard.appendChild(label);
+        handCard.addEventListener("pointerdown",(ev)=>{
           ev.preventDefault();
-          const x=ev.clientX + $table.scrollLeft;
-          const y=ev.clientY + $table.scrollTop - 240; // spawn above dock
-          state.cards[uid].x=x; state.cards[uid].y=y; state.cards[uid].z=state.zCounter++;
-          endDrag(x,y); // will move to battlefield
+          if(ev.button===2) return;
+          const spawnX=ev.clientX + $table.scrollLeft;
+          const spawnY=ev.clientY + $table.scrollTop - 240; // spawn above dock
+          moveCard(uid, "hand", "battlefield");
+          const cardState=state.cards[uid];
+          cardState.zone="battlefield";
+          cardState.x=spawnX;
+          cardState.y=spawnY;
+          beginDrag(uid, spawnX, spawnY, "battlefield");
+          continueDrag(spawnX, spawnY);
         });
-        strip.appendChild(hc);
+        strip.appendChild(handCard);
+      }
+
+      if(dragUid){
+        const activeCard=$table.querySelector(`.card[data-uid="${dragUid}"]`);
+        if(activeCard){
+          activeCard.classList.add("is-dragging");
+          activeCard.style.left=(lastPointerX + dragDX)+"px";
+          activeCard.style.top=(lastPointerY + dragDY)+"px";
+        }
+        if(ghost && !$table.contains(ghost)){
+          ghost.style.left=(lastPointerX + dragDX)+"px";
+          ghost.style.top=(lastPointerY + dragDY)+"px";
+          $table.appendChild(ghost);
+        }
       }
     }
 
